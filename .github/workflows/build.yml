@@ -1,0 +1,102 @@
+name: Build Samsung A52 Kernel (KSU Next + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc git wget python3 zlib1g-dev zip ccache
+
+      - name: Clone Kernel Source (Samsung A52 4G - SM-A525F)
+        run: |
+          git clone --depth=1 https://github.com/A525F-Development/kernel_samsung_sm7125.git -b android-14 kernel || \
+          git clone --depth=1 https://github.com/LineageOS/android_kernel_samsung_sm7125.git -b lineage-21 kernel
+
+      - name: Setup KernelSU-Next & SUSFS
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs4ksu
+          cp /tmp/susfs4ksu/kernel_patches/fs/* fs/
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+      - name: Inject Defconfig Configurations
+        run: |
+          cd kernel
+          DEFCONFIG_FILE=""
+          if [ -f "arch/arm64/configs/vendor/atoll_server_defconfig" ]; then
+            DEFCONFIG_FILE="arch/arm64/configs/vendor/atoll_server_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/sdm7125_defconfig" ]; then
+            DEFCONFIG_FILE="arch/arm64/configs/vendor/sdm7125_defconfig"
+          else
+            DEFCONFIG_FILE=$(find arch/arm64/configs -name "*defconfig" | head -n 1)
+          fi
+          
+          cat << 'EOF' >> "$DEFCONFIG_FILE"
+# KernelSU Next & OverlayFS (Magic Mount)
+CONFIG_KSU=y
+CONFIG_KSU_NEXT=y
+CONFIG_OVERLAY_FS=y
+
+# SUSFS Configurations
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_MAP=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_BIND=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_HIDE_KALLSYMS=y
+CONFIG_KSU_SUSFS_LOGGING=y
+# CONFIG_KSU_SUSFS_OVERLAYFS is not set
+EOF
+
+      - name: Setup Clang Toolchain & Compile Kernel
+        run: |
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 /opt/clang
+          export PATH="/opt/clang/clang-r383902/bin:$PATH"
+          cd kernel
+          
+          DEFCONFIG_NAME="atoll_server_defconfig"
+          if [ -f "arch/arm64/configs/vendor/atoll_server_defconfig" ]; then
+            DEFCONFIG_NAME="vendor/atoll_server_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/sdm7125_defconfig" ]; then
+            DEFCONFIG_NAME="vendor/sdm7125_defconfig"
+          fi
+          
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- "$DEFCONFIG_NAME"
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- -j$(nproc)
+
+      - name: Package AnyKernel3 Zip
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git /tmp/AnyKernel3
+          rm -rf /tmp/AnyKernel3/.git
+          
+          IMAGE_PATH=""
+          if [ -f "kernel/out/arch/arm64/boot/Image.gz-dtb" ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image.gz-dtb"
+          elif [ -f "kernel/out/arch/arm64/boot/Image.gz" ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image.gz"
+          else
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image"
+          fi
+          
+          cp "$IMAGE_PATH" /tmp/AnyKernel3/
+          cd /tmp/AnyKernel3
+          zip -r9 ../A525F-KernelSU-Next-SUSFS-TWRP.zip *
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: A525F-KernelSU-Next-SUSFS-Package
+          path: /tmp/A525F-KernelSU-Next-SUSFS-TWRP.zip
